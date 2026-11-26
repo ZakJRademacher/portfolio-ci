@@ -1,0 +1,27 @@
+# Copy to .github/workflows/checks.yml. Replace PORTFOLIO_CI_SHA (see portfolio-ci README).
+name: checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  attribution:
+    uses: ZakJRademacher/portfolio-ci/.github/workflows/attribution.yml@PORTFOLIO_CI_SHA # v1.0.0
+
+  hygiene:
+    uses: ZakJRademacher/portfolio-ci/.github/workflows/hygiene.yml@PORTFOLIO_CI_SHA # v1.0.0
+    permissions:
+      contents: read
+      pull-requests: read
+    with:
+      live-url: https://zakjrademacher.github.io/REPO/ # or require-live-link: false for repos without a site
+
+  blocked-names:
+    uses: ZakJRademacher/portfolio-ci/.github/workflows/blocked-names.yml@PORTFOLIO_CI_SHA # v1.0.0
+    secrets:
+      blocked-names: ${{ secrets.PORTFOLIO_BLOCKED }}
+      blocked-stems: ${{ secrets.PORTFOLIO_BLOCKED_STEMS }}

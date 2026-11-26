@@ -1,0 +1,119 @@
+name: hygiene
+
+# Repository tidiness: flags merged and stale branches, and checks that the
+# README opens with a screenshot and a link to the live site.
+
+on:
+  workflow_call:
+    inputs:
+      check-branches:
+        description: List merged and stale branches.
+        type: boolean
+        default: true
+      stale-days:
+        description: A branch with no commits for this many days is stale.
+        type: number
+        default: 90
+      ignore-branches:
+        description: Space-separated branch names never flagged (the default branch is always ignored).
+        type: string
+        default: gh-pages
+      fail-on-branches:
+        description: Fail the job when a branch is flagged (otherwise warn only).
+        type: boolean
+        default: false
+      check-readme:
+        description: Check that the README starts with a screenshot and a live link.
+        type: boolean
+        default: true
+      readme-path:
+        description: README to check.
+        type: string
+        default: README.md
+      readme-top-lines:
+        description: The live link must appear within this many lines from the top.
+        type: number
+        default: 15
+      live-url:
+        description: If set, the README must link to exactly this URL near the top.
+        type: string
+        default: ""
+      require-live-link:
+        description: Require a live link at all (turn off for repos without a site).
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  branches:
+    name: branches
+    if: ${{ inputs.check-branches }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read # merged PRs, to spot squash-merged branches
+    steps:
+      - name: Check out the repository (all branches)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Get portfolio-ci scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .portfolio-ci
+          persist-credentials: false
+      - name: Find merged and stale branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
+          DAYS: ${{ inputs.stale-days }}
+          IGNORE: ${{ inputs.ignore-branches }}
+          FAIL: ${{ inputs.fail-on-branches }}
+        run: |
+          set -uo pipefail
+          rc=0
+          out=$(bash .portfolio-ci/scripts/branch-hygiene.sh "${DEFAULT:-main}" "$DAYS" "$IGNORE") || rc=$?
+          { echo "### Branches"; echo; echo "$out"; } >> "$GITHUB_STEP_SUMMARY"
+          echo "$out"
+          if [ $rc -eq 3 ]; then
+            msg="Some branches are merged or stale; delete them or add them to ignore-branches."
+            if [ "$FAIL" = "true" ]; then echo "::error title=hygiene::$msg"; exit 1; fi
+            echo "::warning title=hygiene::$msg"
+          elif [ $rc -ne 0 ]; then
+            exit $rc
+          fi
+
+  readme:
+    name: readme
+    if: ${{ inputs.check-readme }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Get portfolio-ci scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .portfolio-ci
+          persist-credentials: false
+      - name: Check the README opening
+        env:
+          README: ${{ inputs.readme-path }}
+          TOP: ${{ inputs.readme-top-lines }}
+          LIVE: ${{ inputs.live-url }}
+          NEED_LIVE: ${{ inputs.require-live-link }}
+        run: |
+          set -uo pipefail
+          extra=(); [ "$NEED_LIVE" = "true" ] || extra=(--no-live-link)
+          python3 .portfolio-ci/scripts/readme_check.py "$README" --top-lines "$TOP" --live-url "$LIVE" "${extra[@]}"

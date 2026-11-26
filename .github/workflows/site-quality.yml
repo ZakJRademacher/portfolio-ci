@@ -1,0 +1,231 @@
+name: site-quality
+
+# Checks a live site: broken links, social preview tags (og:title, og:image,
+# description, and that the og:image loads), and Lighthouse scores.
+# Run it after the site deploys, or on a schedule.
+
+on:
+  workflow_call:
+    inputs:
+      url:
+        description: Base URL of the live site, e.g. https://example.github.io/project/
+        type: string
+        required: true
+      paths:
+        description: Space-separated paths to check, relative to url. "" means just the url.
+        type: string
+        default: ""
+      check-links:
+        description: Check links on the pages with lychee.
+        type: boolean
+        default: true
+      check-external-links:
+        description: Also check links that leave the site (otherwise only same-host links).
+        type: boolean
+        default: true
+      lighthouse:
+        description: Run Lighthouse.
+        type: boolean
+        default: true
+      lighthouse-enforce:
+        description: Fail the job when a score is below its threshold (otherwise warn only).
+        type: boolean
+        default: false
+      lighthouse-runs:
+        description: Lighthouse runs per page; the median run is scored.
+        type: number
+        default: 3
+      lighthouse-preset:
+        description: desktop or mobile.
+        type: string
+        default: desktop
+      min-performance:
+        description: Minimum performance score, 0-1. 0 turns the check off.
+        type: number
+        default: 0.8
+      min-accessibility:
+        description: Minimum accessibility score, 0-1.
+        type: number
+        default: 0.9
+      min-best-practices:
+        description: Minimum best-practices score, 0-1.
+        type: number
+        default: 0.9
+      min-seo:
+        description: Minimum SEO score, 0-1.
+        type: number
+        default: 0.9
+    secrets:
+      blocked-names:
+        description: Optional JSON array of exact names; the live pages must not contain any.
+        required: false
+      blocked-stems:
+        description: Optional JSON array of stems; a hit on a live page only warns.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  pages:
+    name: pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      urls: ${{ steps.urls.outputs.urls }}
+      host: ${{ steps.urls.outputs.host }}
+    steps:
+      - name: List the pages
+        id: urls
+        env:
+          BASE: ${{ inputs.url }}
+          PATHS: ${{ inputs.paths }}
+        run: |
+          set -euo pipefail
+          case "$BASE" in https://*|http://*) ;; *) echo "::error title=site-quality::url must start with https://"; exit 1 ;; esac
+          base="${BASE%/}/"
+          urls=""
+          if [ -z "$PATHS" ]; then urls="$BASE"; fi
+          for p in $PATHS; do urls="$urls ${base}${p#/}"; done
+          urls="${urls# }"
+          host=$(echo "$BASE" | sed -E 's#^https?://([^/]+).*#\1#')
+          echo "Pages: $urls"
+          echo "urls=$urls" >> "$GITHUB_OUTPUT"
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+
+  page-names:
+    name: page-names
+    needs: pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Get portfolio-ci scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .portfolio-ci
+          persist-credentials: false
+      - name: Check the live pages for blocked names
+        # Runs first, so the terms are masked before any page text is printed. A live
+        # site is public even when its repository is private, so this always runs
+        # when lists are supplied.
+        env:
+          URLS: ${{ needs.pages.outputs.urls }}
+          BLOCKED_JSON: ${{ secrets.blocked-names }}
+          STEMS_JSON: ${{ secrets.blocked-stems }}
+        run: |
+          set -uo pipefail
+          s=.portfolio-ci/scripts/blocked-scan.sh
+          if [ -z "$BLOCKED_JSON$STEMS_JSON" ]; then
+            echo "::notice title=blocked names::No block list supplied, so the live pages were not checked for blocked names."
+            exit 0
+          fi
+          bash "$s" mask || exit 1
+          read -ra urls <<< "$URLS"
+          stream="$RUNNER_TEMP/pages"; : > "$stream"
+          for u in "${urls[@]}"; do
+            # Raw HTML plus its visible text and attributes with entities decoded.
+            curl -fsSL --max-time 30 "$u" | bash "$s" html-text "page $u" >> "$stream"               || { echo "::error title=blocked names::could not fetch $u, so it was not checked"; exit 1; }
+          done
+          bash "$s" scan < "$stream"
+
+  social-preview:
+    name: social-preview
+    needs: [pages, page-names] # after the blocked-name check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Get portfolio-ci scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .portfolio-ci
+          persist-credentials: false
+      - name: Check og:title, og:image and description
+        env:
+          URLS: ${{ needs.pages.outputs.urls }}
+        run: |
+          read -ra urls <<< "$URLS"
+          python3 .portfolio-ci/scripts/site_meta.py "${urls[@]}"
+
+  links:
+    name: links
+    needs: [pages, page-names] # after the blocked-name check
+    if: ${{ inputs.check-links }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Build lychee arguments
+        id: args
+        env:
+          URLS: ${{ needs.pages.outputs.urls }}
+          HOST: ${{ needs.pages.outputs.host }}
+          EXTERNAL: ${{ inputs.check-external-links }}
+        run: |
+          set -euo pipefail
+          read -ra urls <<< "$URLS"
+          args=(--no-progress --max-retries 3 --retry-wait-time 5 --timeout 30 --accept '200..=299,429')
+          if [ "$EXTERNAL" != "true" ]; then
+            # lychee: --include wins over --exclude, so only same-host links are checked.
+            host_re="^https?://$(printf '%s' "$HOST" | sed 's/[.]/[.]/g')(/|$)"
+            args+=(--include "$host_re" --exclude '.*')
+          fi
+          # The action runs its args through the shell, so quote every word.
+          printf -v quoted '%q ' "${args[@]}" "${urls[@]}"
+          echo "args=$quoted" >> "$GITHUB_OUTPUT"
+      - name: Check links
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: ${{ steps.args.outputs.args }}
+          fail: true
+          jobSummary: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  lighthouse:
+    name: lighthouse
+    needs: [pages, page-names] # after the blocked-name check
+    if: ${{ inputs.lighthouse }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Get portfolio-ci scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .portfolio-ci
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Write the Lighthouse CI config
+        env:
+          URLS: ${{ needs.pages.outputs.urls }}
+          RUNS: ${{ inputs.lighthouse-runs }}
+          PRESET: ${{ inputs.lighthouse-preset }}
+          PERF: ${{ inputs.min-performance }}
+          A11Y: ${{ inputs.min-accessibility }}
+          BP: ${{ inputs.min-best-practices }}
+          SEO: ${{ inputs.min-seo }}
+          LEVEL: ${{ inputs.lighthouse-enforce && 'error' || 'warn' }}
+        run: >-
+          python3 .portfolio-ci/scripts/lhci_config.py lighthouserc.json
+          --urls "$URLS" --runs "$RUNS" --preset "$PRESET" --level "$LEVEL"
+          --performance "$PERF" --accessibility "$A11Y" --best-practices "$BP" --seo "$SEO"
+      - name: Run Lighthouse
+        run: npx --yes @lhci/cli@0.16.1 autorun --config=lighthouserc.json
+      - name: Summarise scores
+        if: ${{ always() }}
+        run: python3 .portfolio-ci/scripts/lhci_summary.py .lighthouseci >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lighthouse-reports
+          path: .lighthouseci/
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn

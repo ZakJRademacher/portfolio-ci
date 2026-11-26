@@ -1,0 +1,22 @@
+# Copy to .github/workflows/release.yml in repos that ship versions. Replace PORTFOLIO_CI_SHA.
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  attribution:
+    uses: ZakJRademacher/portfolio-ci/.github/workflows/attribution.yml@PORTFOLIO_CI_SHA # v1.0.0
+
+  release:
+    needs: attribution
+    uses: ZakJRademacher/portfolio-ci/.github/workflows/release.yml@PORTFOLIO_CI_SHA # v1.0.0
+    permissions:
+      contents: write
+    secrets:
+      blocked-names: ${{ secrets.PORTFOLIO_BLOCKED }}
+      blocked-stems: ${{ secrets.PORTFOLIO_BLOCKED_STEMS }}

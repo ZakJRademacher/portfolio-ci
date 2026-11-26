@@ -1,0 +1,20 @@
+name: publish-release
+
+# portfolio-ci releases itself with its own release workflow.
+
+on:
+  push:
+    tags: ["v*.*.*"] # not the moving v1 tag
+
+permissions:
+  contents: read
+
+jobs:
+  attribution:
+    uses: ./.github/workflows/attribution.yml
+
+  release:
+    needs: attribution
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write

@@ -1,0 +1,6 @@
+# actionlint 1.7.12 predates the job.workflow_repository / job.workflow_sha contexts
+# that GitHub documents for reusable workflows. Remove this once actionlint knows them.
+paths:
+  .github/workflows/**/*.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined'

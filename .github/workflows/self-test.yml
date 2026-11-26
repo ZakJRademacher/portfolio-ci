@@ -1,0 +1,102 @@
+name: self-test
+
+# Tests portfolio-ci itself: the scripts (with fixtures), workflow lint, and a
+# real run of each reusable workflow through a local `uses: ./...` call.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1" # weekly, to catch drift in pinned tools and the live site
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    name: scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run the script tests
+        run: bash tests/run.sh
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: actionlint (with shellcheck)
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # 1.7.12
+        with:
+          args: -color
+
+  attribution:
+    uses: ./.github/workflows/attribution.yml
+
+  attribution-full-history:
+    uses: ./.github/workflows/attribution.yml
+    with:
+      full-history: true
+
+  hygiene:
+    uses: ./.github/workflows/hygiene.yml
+    permissions:
+      contents: read
+      pull-requests: read
+    with:
+      readme-path: tests/fixtures/readme/good.md
+      live-url: https://perigee.example.dev/
+
+  release-dry-run:
+    uses: ./.github/workflows/release.yml
+    # GitHub checks a called workflow's job permissions before evaluating `if:`, so
+    # the caller must allow what `publish` asks for, even though dry-run skips it.
+    permissions:
+      contents: write
+    with:
+      version: 1.2.0
+      changelog-path: tests/fixtures/CHANGELOG.md
+      dry-run: true
+
+  site-quality:
+    uses: ./.github/workflows/site-quality.yml
+    with:
+      url: https://perigee.zakjrademacher.workers.dev/
+      check-external-links: false
+      lighthouse-runs: 1
+
+  scorecard:
+    # Scorecard scores the default branch, and fork PRs cannot upload SARIF.
+    if: ${{ github.event_name != 'pull_request' }}
+    uses: ./.github/workflows/scorecard.yml
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+
+  blocked-names:
+    # Uses the repo's PORTFOLIO_BLOCKED / PORTFOLIO_BLOCKED_STEMS secrets when set;
+    # skips with a notice otherwise (forks, Dependabot).
+    uses: ./.github/workflows/blocked-names.yml
+    secrets:
+      blocked-names: ${{ secrets.PORTFOLIO_BLOCKED }}
+      blocked-stems: ${{ secrets.PORTFOLIO_BLOCKED_STEMS }}
+
+  blocked-names-synthetic:
+    # Proves the workflow end to end with made-up lists, whatever the secrets are.
+    uses: ./.github/workflows/blocked-names.yml
+    with:
+      require-lists: true
+    secrets:
+      # format() keeps the made-up terms out of this file's own text.
+      blocked-names: ${{ format('["zz-selftest-{0}"]', 'blocked') }}
+      blocked-stems: ${{ format('["zz-selftest-{0}"]', 'stem') }}

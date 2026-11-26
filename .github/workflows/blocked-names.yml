@@ -1,0 +1,132 @@
+name: blocked-names
+
+# Fails when a name on Security's private block list appears in the repository:
+# file contents, file paths, commit messages, ref names, tag messages and
+# pull request text. A hit on the review-stem list is a warning only.
+#
+# The lists are private, so they are never in this repo or the caller's repo.
+# The caller passes them as secrets (JSON arrays of strings). When no list is
+# passed (fork PRs, Dependabot PRs, repos without the secrets) the check is
+# skipped with a notice, unless require-lists is true. Private repositories are
+# exempt; anything not reported as private is treated as public.
+#
+# Leak safety: every term is masked (as written, lower and upper case) before any
+# repository content is read. PR text and ref names are read from the event file,
+# never passed through step `env:` (which the log prints). Reports show only a
+# location and a term number, and a location that itself contains a listed name
+# is replaced by a short hash.
+
+on:
+  workflow_call:
+    inputs:
+      scope:
+        description: "changes (default: the push or PR's commits, the current files and PR text) or history (every ref, tag and blob)"
+        type: string
+        default: changes
+      require-lists:
+        description: Fail instead of skipping when no list is supplied.
+        type: boolean
+        default: false
+    secrets:
+      blocked-names:
+        description: JSON array of exact names. A hit fails the job.
+        required: false
+      blocked-stems:
+        description: JSON array of stems to review. A hit only warns.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Get portfolio-ci scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .portfolio-ci
+          persist-credentials: false
+
+      - name: Load and mask the lists
+        id: lists
+        env:
+          BLOCKED_JSON: ${{ secrets.blocked-names }}
+          STEMS_JSON: ${{ secrets.blocked-stems }}
+          REQUIRE: ${{ inputs.require-lists }}
+          VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          set -uo pipefail
+          # Policy: private repos are exempt. Anything not reported as private
+          # (including an empty value) is treated as public.
+          if [ "$VISIBILITY" = "private" ]; then
+            echo "::notice title=blocked names::This repository is private, so it is exempt from the blocked-name check."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$BLOCKED_JSON" ] && [ -z "$STEMS_JSON" ]; then
+            msg="No block list was supplied (the blocked-names / blocked-stems secrets are empty here), so names were not checked."
+            if [ "$REQUIRE" = "true" ]; then echo "::error title=blocked names::$msg"; exit 1; fi
+            echo "::notice title=blocked names::$msg"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Validates the lists (exit 2 on a malformed list) and masks every term.
+          bash .portfolio-ci/scripts/blocked-scan.sh mask || exit 1
+          echo "present=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the repository (full history)
+        if: ${{ steps.lists.outputs.present == 'true' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          path: repo
+
+      - name: Scan
+        if: ${{ steps.lists.outputs.present == 'true' }}
+        working-directory: repo
+        env:
+          BLOCKED_JSON: ${{ secrets.blocked-names }}
+          STEMS_JSON: ${{ secrets.blocked-stems }}
+          SCOPE: ${{ inputs.scope }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -uo pipefail
+          s=../.portfolio-ci/scripts/blocked-scan.sh
+          stream="$RUNNER_TEMP/stream"
+          fail() { echo "::error title=blocked names::$1, so the scan is incomplete."; exit 1; }
+          case "$SCOPE" in
+            history)
+              echo "Scanning every ref, tag, commit message, path and file version."
+              bash "$s" history > "$stream" || fail "could not read the full history"
+              ;;
+            changes)
+              range=$(bash ../.portfolio-ci/scripts/attribution-range.sh) || fail "could not work out the commit range"
+              read -ra revs <<< "$range"
+              echo "Scanning the current files, plus messages and added lines in: $range"
+              : > "$stream"
+              bash "$s" tree >> "$stream" || fail "could not read the current files"
+              bash "$s" messages "${revs[@]}" >> "$stream" || fail "could not read commit messages"
+              bash "$s" added "${revs[@]}" >> "$stream" || fail "could not read the added lines"
+              # Ref names and PR text come from the runner's own variables and the
+              # event file, so they never appear in this step's logged env.
+              printf 'ref\t%s\n' "$GITHUB_REF" >> "$stream"
+              [ -n "${GITHUB_HEAD_REF:-}" ] && printf 'pull request branch\t%s\n' "$GITHUB_HEAD_REF" >> "$stream"
+              if [ "$EVENT" = pull_request ] || [ "$EVENT" = pull_request_target ]; then
+                jq -r '.pull_request.title // ""' "$GITHUB_EVENT_PATH" | bash "$s" text "pull request title" >> "$stream" || fail "could not read the PR title"
+                jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH" | tr -d '\r' | bash "$s" text "pull request body" >> "$stream" || fail "could not read the PR body"
+              fi
+              ;;
+            *) echo "::error title=blocked names::scope must be changes or history"; exit 1 ;;
+          esac
+          bash "$s" scan < "$stream"

@@ -1,0 +1,22 @@
+# Copy to .github/workflows/scorecard.yml. Replace PORTFOLIO_CI_SHA.
+# Scorecard scores the default branch, so it runs on pushes to main and weekly.
+name: scorecard
+
+on:
+  push:
+    branches: [main]
+  branch_protection_rule:
+  schedule:
+    - cron: "30 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scorecard:
+    uses: ZakJRademacher/portfolio-ci/.github/workflows/scorecard.yml@PORTFOLIO_CI_SHA # v1.0.0
+    permissions:
+      contents: read
+      actions: read
+      security-events: write

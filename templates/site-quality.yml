@@ -1,0 +1,24 @@
+# Copy to .github/workflows/site-quality.yml in repos with a live site.
+# Replace PORTFOLIO_CI_SHA, the deploy workflow name and the URL.
+name: site-quality
+
+on:
+  workflow_run:
+    workflows: [deploy]
+    types: [completed]
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  site:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+    uses: ZakJRademacher/portfolio-ci/.github/workflows/site-quality.yml@PORTFOLIO_CI_SHA # v1.0.0
+    with:
+      url: https://zakjrademacher.github.io/REPO/
+    secrets:
+      blocked-names: ${{ secrets.PORTFOLIO_BLOCKED }}
+      blocked-stems: ${{ secrets.PORTFOLIO_BLOCKED_STEMS }}

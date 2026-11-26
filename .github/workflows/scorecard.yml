@@ -1,0 +1,69 @@
+name: scorecard
+
+# OpenSSF Scorecard: scores the repository's supply-chain practices (pinned
+# dependencies, token permissions, branch protection and more) and uploads the
+# findings to GitHub code scanning as SARIF (Security > Code scanning).
+#
+# Results are not published to the public Scorecard API: publishing needs an
+# id-token grant, and Scorecard checks the workflow that requests it, which does
+# not fit a reusable workflow. The code-scanning results are the same.
+
+on:
+  workflow_call:
+    inputs:
+      fail-below:
+        description: Fail the job when the overall score is below this (0-10). 0 never fails.
+        type: number
+        default: 0
+
+permissions:
+  contents: read
+
+jobs:
+  analysis:
+    name: analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read          # read workflow runs for the CI-Tests and Dangerous-Workflow checks
+      security-events: write # upload SARIF to code scanning
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard (SARIF)
+        uses: ossf/scorecard-action@23f22cd43608bae7a1f1fa2603d7314dee9538a5 # v2.6.0
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: false
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        with:
+          sarif_file: scorecard.sarif
+          category: scorecard
+
+      - name: Run Scorecard (score)
+        if: ${{ inputs.fail-below > 0 }}
+        uses: ossf/scorecard-action@23f22cd43608bae7a1f1fa2603d7314dee9538a5 # v2.6.0
+        with:
+          results_file: scorecard.json
+          results_format: json
+          publish_results: false
+
+      - name: Check the score
+        if: ${{ inputs.fail-below > 0 }}
+        env:
+          MIN: ${{ inputs.fail-below }}
+        run: |
+          set -euo pipefail
+          score=$(jq -r '.score' scorecard.json)
+          echo "### Scorecard: $score / 10 (minimum $MIN)" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.checks[] | "| \(.name) | \(.score) | \(.reason) |"' scorecard.json \
+            | { echo "| Check | Score | Reason |"; echo "| --- | --- | --- |"; cat; } >> "$GITHUB_STEP_SUMMARY"
+          awk -v s="$score" -v m="$MIN" 'BEGIN { exit !(s + 0 >= m + 0) }' \
+            || { echo "::error title=scorecard::score $score is below $MIN"; exit 1; }

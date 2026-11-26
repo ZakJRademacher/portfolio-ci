@@ -1,0 +1,61 @@
+name: attribution
+
+# Fails if any commit in a push or pull request credits Claude/Anthropic:
+# a Co-Authored-By line naming them, a Claude-Session trailer, "Generated with
+# Claude Code", or an author/committer called Claude or at anthropic.com.
+# Same rules as the optional local git guard (attribution-guard.sh), which you keep
+# in your private config repo and install as a global git hook.
+
+on:
+  workflow_call:
+    inputs:
+      full-history:
+        description: Scan every commit reachable from any branch or tag, not just the new ones.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository (full history)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Get portfolio-ci scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .portfolio-ci
+          persist-credentials: false
+
+      - name: Work out which commits to scan
+        id: range
+        env:
+          EVENT: ${{ github.event_name }}
+          FULL: ${{ inputs.full-history }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          range=$(bash .portfolio-ci/scripts/attribution-range.sh)
+          echo "Range: $range"
+          echo "range=$range" >> "$GITHUB_OUTPUT"
+
+      - name: Scan commits
+        env:
+          RANGE: ${{ steps.range.outputs.range }}
+        run: |
+          read -ra args <<< "$RANGE"
+          bash .portfolio-ci/scripts/attribution-scan.sh "${args[@]}"

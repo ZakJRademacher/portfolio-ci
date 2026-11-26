@@ -1,0 +1,158 @@
+name: release
+
+# On a v* tag push, publish a GitHub Release whose notes are that version's
+# CHANGELOG section. Fails if the section is missing or empty.
+# The caller's job must grant `contents: write`.
+
+on:
+  workflow_call:
+    inputs:
+      changelog-path:
+        description: Path to the changelog in the calling repository.
+        type: string
+        default: CHANGELOG.md
+      version:
+        description: Version to release. Defaults to the pushed tag without its leading "v".
+        type: string
+        default: ""
+      dry-run:
+        description: Extract and show the notes, but do not create a release.
+        type: boolean
+        default: false
+      draft:
+        description: Create the release as a draft.
+        type: boolean
+        default: false
+    secrets:
+      blocked-names:
+        description: Optional JSON array of exact names; the notes must not contain any.
+        required: false
+      blocked-stems:
+        description: Optional JSON array of stems; a hit in the notes only warns.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  notes:
+    name: notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Get portfolio-ci scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .portfolio-ci
+          persist-credentials: false
+
+      - name: Work out the version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_VERSION" ]; then
+            tag="v${INPUT_VERSION#v}"
+          elif [ "$REF_TYPE" = "tag" ]; then
+            tag="$REF_NAME"
+          else
+            echo "::error title=release::not a tag push; push a v* tag or pass the version input."
+            exit 1
+          fi
+          case "$tag" in v[0-9]*) ;; *) echo "::error title=release::tag $tag does not look like v1.2.3"; exit 1 ;; esac
+          if [ "$DRY_RUN" != "true" ] && [ "$REF_TYPE" = "tag" ] && [ "$REF_NAME" != "$tag" ]; then
+            echo "::error title=release::version input $tag does not match the pushed tag $REF_NAME"; exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Extract the changelog section
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          CHANGELOG: ${{ inputs.changelog-path }}
+          BLOCKED_JSON: ${{ secrets.blocked-names }}
+          STEMS_JSON: ${{ secrets.blocked-stems }}
+          VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          set -euo pipefail
+          bash .portfolio-ci/scripts/changelog-section.sh "$TAG" "$CHANGELOG" > "$RUNNER_TEMP/notes.md"
+          # Check the notes against the block lists (when supplied) before printing them.
+          # Private repos have private releases, so they are exempt (empty = public).
+          if [ "$VISIBILITY" != private ] && [ -n "$BLOCKED_JSON$STEMS_JSON" ]; then
+            bash .portfolio-ci/scripts/blocked-scan.sh mask
+            bash .portfolio-ci/scripts/blocked-scan.sh text "release notes $TAG" < "$RUNNER_TEMP/notes.md" \
+              | bash .portfolio-ci/scripts/blocked-scan.sh scan
+            # Don't echo the notes into the log when lists are in play: a stem hit only
+            # warns, and its text could appear in a letter case the masks don't cover.
+            echo "Release notes for $TAG: $(wc -l < "$RUNNER_TEMP/notes.md") lines, checked against the block lists."
+          else
+            [ "$VISIBILITY" = private ] || echo "::notice title=release::No block list supplied, so the notes were not checked for blocked names."
+            { echo "### Release notes for $TAG"; echo; cat "$RUNNER_TEMP/notes.md"; } >> "$GITHUB_STEP_SUMMARY"
+            cat "$RUNNER_TEMP/notes.md"
+          fi
+
+  publish:
+    name: publish
+    needs: notes
+    if: ${{ !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the tag being released
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.notes.outputs.tag }}
+          persist-credentials: false
+
+      - name: Get portfolio-ci scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .portfolio-ci
+          persist-credentials: false
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.notes.outputs.tag }}
+          CHANGELOG: ${{ inputs.changelog-path }}
+          DRAFT: ${{ inputs.draft }}
+          BLOCKED_JSON: ${{ secrets.blocked-names }}
+          STEMS_JSON: ${{ secrets.blocked-stems }}
+          VISIBILITY: ${{ github.event.repository.visibility }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/notes.md"
+          bash .portfolio-ci/scripts/changelog-section.sh "$TAG" "$CHANGELOG" > "$notes"
+          # The tag's notes are what gets published, so check them again here.
+          # Private repos have private releases, so they are exempt (empty = public).
+          if [ "$VISIBILITY" != private ] && [ -n "$BLOCKED_JSON$STEMS_JSON" ]; then
+            bash .portfolio-ci/scripts/blocked-scan.sh mask
+            bash .portfolio-ci/scripts/blocked-scan.sh text "release notes $TAG" < "$notes" \
+              | bash .portfolio-ci/scripts/blocked-scan.sh scan
+          fi
+          pre=(); case "$TAG" in *-*) pre=(--prerelease) ;; esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --notes-file "$notes"
+            echo "Updated the notes of the existing release $TAG."
+          else
+            draft=(); [ "$DRAFT" = "true" ] && draft=(--draft)
+            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$notes" "${pre[@]}" "${draft[@]}"
+            echo "Created release $TAG."
+          fi
