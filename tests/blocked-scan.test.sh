@@ -117,7 +117,7 @@ echo "== blocked-scan.sh hardening"
 export BLOCKED_FILE="$work/blocked.json" STEMS_FILE="$work/stems.json"
 out=$(printf 'path ZORBLAX/x.txt\tZORBLAX/x.txt\n' | BLOCKED_REDACT=1 bash "$bs" scan 2>&1)
 grep -q "location withheld" <<<"$out" && ! grep -qi zorblax <<<"$out" && ok "a location containing a term is withheld (any case)" || bad "a location containing a term is withheld" "$out"
-out=$(printf 'path ZORBLAX/x.txt\tZORBLAX/x.txt\n' | bash "$bs" scan 2>&1)
+out=$(printf 'path ZORBLAX/x.txt\tZORBLAX/x.txt\n' | env -u GITHUB_ACTIONS -u BLOCKED_REDACT bash "$bs" scan 2>&1)
 grep -q "ZORBLAX/x.txt" <<<"$out" && ok "  locally (no CI) the location is shown" || bad "  locally the location is shown" "$out"
 GITHUB_ACTIONS=true bash -c 'printf "ref refs/heads/Blue-Moon-x\trefs/heads/Blue Moon x\n" | bash "$0" scan' "$bs" > "$work/o" 2>&1
 ! grep -qi "blue" "$work/o" && ok "  in CI the location is withheld automatically" || bad "  in CI the location is withheld automatically" "$(cat "$work/o")"
