@@ -124,9 +124,14 @@ jobs:
           bash "$s" mask || exit 1
           read -ra urls <<< "$URLS"
           stream="$RUNNER_TEMP/pages"; : > "$stream"
+          page="$RUNNER_TEMP/page.html"
           for u in "${urls[@]}"; do
-            # Raw HTML plus its visible text and attributes with entities decoded.
-            curl -fsSL --max-time 30 "$u" | bash "$s" html-text "page $u" >> "$stream"               || { echo "::error title=blocked names::could not fetch $u, so it was not checked"; exit 1; }
+            # Save the page first (never pipe downloaded content into a shell), then
+            # stream its raw HTML plus visible text and attributes with entities decoded.
+            if ! curl -fsSL --max-time 30 -o "$page" "$u"; then
+              echo "::error title=blocked names::could not fetch $u, so it was not checked"; exit 1
+            fi
+            bash "$s" html-text "page $u" < "$page" >> "$stream" || { echo "::error title=blocked names::could not read $u"; exit 1; }
           done
           bash "$s" scan < "$stream"
 
